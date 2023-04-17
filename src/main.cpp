@@ -744,6 +744,7 @@ void seq11(void)
   case 100:
   {
     String parent_path = "/devices/TIMER_" + String(device_id) + "/data_logger/" + get_date() + "/" + String(get_epoch_time());
+    Serial.println(parent_path);
     json.clear();
     json.set("/epoch_time", get_epoch_time());
     json.set("/target", target);
