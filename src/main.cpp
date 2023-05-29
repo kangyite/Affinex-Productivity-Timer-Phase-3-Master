@@ -9,10 +9,19 @@
 #include <Firebase_ESP_Client.h>
 #include "addons/TokenHelper.h"
 #include "addons/RTDBHelper.h"
+#include <SoftwareSerial.h>
+
 #define DEBUG
 #ifdef DEBUG
-#define PRINT(x) Serial.println(x)
+#define PRINT(x) Serial.print(x)
+#define PRINTLN(x) Serial.println(x)
+#define PRINTF(...) printf(__VA_ARGS__)
+#else
+#define PRINT(x)
+#define PRINTLN(x)
+#define PRINTF(...)
 #endif
+
 WiFiMulti wifiMulti;
 hd44780_I2Cexp lcd;
 at24c256 eeprom(0x50);
@@ -24,13 +33,13 @@ at24c256 eeprom(0x50);
 #define R_LED_pin 13
 #define BUZZER_pin 19
 #define MUTE_SW_pin 18
-#define BARCODE_SW_pin 15
-
+#define BARCODE_RX_pin 15
 //==Wifi===================================
-const char wifi_info[][2][20] = {
+const char wifi_info[][2][30] = {
     {"Papaya", "steam123"},
-    {"AFX_6", "8edef@16206"},
-    {"KANG", "kang0124759813"}};
+    {"AFX_6", "8edef@16206"}
+    // {"IP9tcN32kd", "H$u3e*X3-uByaL=BTXw_r45t&"}
+};
 const uint32_t connectTimeoutMs = 10000;
 
 //=== Serial COM ================================================
@@ -135,7 +144,7 @@ int seq[MAX_SEQ_NUM];
 byte device_id;
 uint16_t timer_set, timer_count_down, actual_counter, plan, target;
 uint16_t _u_integer;
-unsigned long target_delay;
+
 enum
 {
   LCD_TIME = 0,
@@ -159,6 +168,7 @@ struct tm timeinfo;
 char working_time[WORKING_TIME_LENGTH];
 char ot_time[WORKING_TIME_LENGTH];
 
+unsigned long total_working_minute = 0;
 bool ot = 0;
 bool set_up = 0;
 //===Tasks==========================================
@@ -174,6 +184,12 @@ FirebaseData stream;
 FirebaseAuth auth;
 FirebaseConfig config;
 FirebaseJson json;
+bool force_update = false;
+
+//===Software Serial for barcode====================================
+#define MYPORT_TX 25
+#define MYPORT_RX 15
+EspSoftwareSerial::UART myPort;
 
 //===================FUNCTIONS DECLARATION=================================
 void init_io();
@@ -187,6 +203,7 @@ void seq3();
 void seq4();
 void seq5();
 void seq6();
+void seq12();
 void seq10();
 void seq11();
 template <class T>
@@ -195,6 +212,7 @@ template <class T>
 int EEPROM_write(int ee, const T &value);
 bool is_working();
 unsigned int count_working_minute();
+unsigned int count_cur_working_minute();
 void printLocalTime();
 void print_help();
 bool isEqual(char arr[], String s);
@@ -237,7 +255,6 @@ void setup()
   Serial2.begin(115200, SERIAL_8N1, RXD2, TXD2);
   Serial.println(F("Program Begin..."));
   print_the_date_and_file_of_sketch();
-
   Wire.begin();
   Serial.println("\nI2C Scanner");
   scan_i2c();
@@ -257,27 +274,42 @@ void setup()
 
   EEPROM_read(EEP_TIMER, timer_set);
   if (timer_set > 10000)
-    timer_set = 100;
+  {
+    timer_set = 300;
+    EEPROM_write(EEP_TIMER, timer_set);
+  }
 
   EEPROM_read(EEP_ACTUAL_COUNTER, actual_counter);
-
   if (actual_counter > 10000)
+  {
     actual_counter = 0;
+    EEPROM_write(EEP_ACTUAL_COUNTER, actual_counter);
+  }
+
   EEPROM_read(EEP_PLAN, plan);
   if (plan > 10000)
-    plan = 1000;
+  {
+    plan = 500;
+    EEPROM_write(EEP_PLAN, plan);
+  }
 
   EEPROM_read(EEP_TARGET, target);
   if (target > 10000)
-    target = 100;
+  {
+    target = 0;
+    EEPROM_write(EEP_TARGET, target);
+  }
+
   EEPROM_read(EEP_OT, ot);
+
   EEPROM_read(EEP_WORKING_TIME, working_time);
   if (working_time[0] == 255)
     memcpy(working_time, DEFAULT_WORKING_TIME, sizeof(DEFAULT_WORKING_TIME));
+
   EEPROM_read(EEP_OT_TIME, ot_time);
   if (ot_time[0] == 255)
     memcpy(ot_time, DEFAULT_OT_TIME, sizeof(DEFAULT_OT_TIME));
-  Serial.println(working_time);
+  // Serial.println(working_time);
   Serial2.print("@spacing 0\r");
   slave_update(LCD_TARGET);
   slave_update(LCD_PLAN);
@@ -303,6 +335,16 @@ void setup()
     Serial.println(device_id);
   }
   timer_reset();
+
+  myPort.begin(115200, SWSERIAL_8N1, MYPORT_RX, MYPORT_TX, false);
+  if (!myPort)
+  { // If the object did not initialize, then its configuration is invalid
+    Serial.println("Invalid EspSoftwareSerial pin configuration, check config");
+    while (1)
+    { // Don't continue with invalid configuration
+      delay(1000);
+    }
+  }
 }
 
 void Task0code(void *parameter)
@@ -348,6 +390,7 @@ void Task0code(void *parameter)
   {
     seq10();
     seq11();
+    seq12();
   }
 }
 
@@ -359,12 +402,13 @@ void loop()
     delay(1000);
     return;
   }
+
   seq0(); // Heart Beat
-  seq1(); //
-  seq2(); //
-  seq3(); //
-  seq4();
-  seq5();
+  seq1(); // Timer
+  seq2(); // Buttons
+  seq3(); // LCD
+  seq4(); // LEDs
+  seq5(); // Buzzer
   seq6();
 }
 
@@ -434,11 +478,6 @@ void seq2(void)
       else if (digitalRead(MUTE_SW_pin) == LOW)
       {
         set_timer(T02, 30);
-        seq[2] = 200;
-      }
-      else if (digitalRead(BARCODE_SW_pin) == HIGH)
-      {
-        set_timer(T02, 130);
         seq[2] = 300;
       }
     }
@@ -453,28 +492,19 @@ void seq2(void)
   case 110:
     if (timer_status(T03) == TIMOUT)
     { // hold
-      target = 0;
       actual_counter = 0;
-      EEPROM_write(EEP_ACTUAL_COUNTER, 0);
-      EEPROM_write(EEP_TARGET, 0);
+      EEPROM_write(EEP_ACTUAL_COUNTER, (uint16_t)0);
       timer_reset();
+      force_update = true;
       seq[3] = 20;
-      seq[2] = 130;
+      seq[2] = 120;
     }
     else if (digitalRead(NEXT_SW_pin) == HIGH)
     { // press
-      seq[2] = 120;
+      seq[2] = 200;
     }
     break;
   case 120:
-    actual_counter++;
-    EEPROM_write(EEP_ACTUAL_COUNTER, actual_counter);
-    timer_reset();
-    lcd_update(LCD_ACTUAL);
-    slave_update(LCD_ACTUAL);
-    seq[2] = 130;
-    break;
-  case 130:
     if (digitalRead(NEXT_SW_pin) == HIGH)
     {
       set_timer(T02, 30);
@@ -482,6 +512,15 @@ void seq2(void)
     }
     break;
   case 200:
+    actual_counter++;
+    mute_toggle = false;
+    EEPROM_write(EEP_ACTUAL_COUNTER, actual_counter);
+    timer_reset();
+    lcd_update(LCD_ACTUAL);
+    slave_update(LCD_ACTUAL);
+    seq[2] = 120;
+    break;
+  case 300:
     if (timer_status(T02) == TIMOUT)
     {
       if (digitalRead(MUTE_SW_pin) == HIGH)
@@ -492,15 +531,7 @@ void seq2(void)
         seq[2] = 0;
       }
     }
-    break;
-  case 300:
-    if (timer_status(T02) == TIMOUT)
-    {
-      if (digitalRead(BARCODE_SW_pin) == LOW)
-      {
-        seq[2] = 120;
-      }
-    }
+
     break;
   default:
     break;
@@ -667,40 +698,23 @@ void seq5()
   }
 }
 
-void seq6(void)
+void seq6()
 {
   switch (seq[6])
   {
   case 0:
-    seq[6] = 100;
-    if (plan == 0)
-      target_delay = -1;
-    target_delay = ((float)1 / ((float)plan / (float)count_working_minute())) * float(60000);
-    set_timer(T06, target_delay);
-    Serial.print("target_dalay: ");
-    Serial.println(target_delay);
-    break;
-  case 100:
-    if (timer_status(T06) == TIMOUT && is_working())
+    while (myPort.available())
     {
-      seq[6] = 110;
+      char c = myPort.read();
+      if (c == '@')
+      {
+        seq[2] = 200;
+      }
     }
-    break;
-  case 110:
-    if (timer_status(T06) == TIMOUT)
-    {
-      if (target < plan)
-        target++;
-      EEPROM_write(EEP_TARGET, target);
-      slave_update(LCD_TARGET);
-      lcd_update(LCD_TARGET);
-      seq[6] = 0; // update target delay
-    }
-    break;
-  default:
     break;
   }
 }
+
 void seq10(void)
 {
   switch (seq[7])
@@ -729,11 +743,17 @@ void seq11(void)
   switch (seq[11])
   {
   case 0:
-    if (timer_status(T11) == TIMOUT)
+    if (timer_status(T11) == TIMOUT || force_update)
     {
       set_timer(T11, 1000);
       getLocalTime(&timeinfo);
-      printLocalTime();
+      // printLocalTime();
+      if (force_update)
+      {
+        Serial.println("Forcing Update");
+        seq[11] = 100;
+        force_update = false;
+      }
       if (timeinfo.tm_sec == 0)
         seq[11] = 200;
       if (timeinfo.tm_min % 5 == 0 && timeinfo.tm_sec == 0)
@@ -744,21 +764,19 @@ void seq11(void)
   case 100:
   {
     String parent_path = "/devices/TIMER_" + String(device_id) + "/data_logger/" + get_date() + "/" + String(get_epoch_time());
-    Serial.println(parent_path);
     json.clear();
     json.set("/epoch_time", get_epoch_time());
     json.set("/target", target);
     json.set("/actual", actual_counter);
-    Serial.println("Set json...\n");
+    // Serial.println("Set json...\n");
     if (Firebase.RTDB.updateNodeAsync(&fbdo, parent_path.c_str(), &json))
     {
-      Serial.println("Added json");
+      Serial.println("Updated to firebase data logger");
     }
     else
     {
       Serial.println(fbdo.errorReason().c_str());
     }
-    set_timer(T11, 5000);
     seq[11] = 200;
 
     break;
@@ -777,13 +795,15 @@ void seq11(void)
       json.set("/timer_set", timer_set);
       json.set("/working_time", working_time);
       json.set("/ot_time", ot_time);
+      json.set("/forceupdate", force_update);
       json.set("/enable_ot", ot);
       json.set("/online", true);
-      Serial.println("Set json...\n");
+      json.set("/lastupdate", get_epoch_time());
+      // Serial.println("Set json...\n");
 
       if (Firebase.RTDB.updateNodeAsync(&fbdo, parent_path.c_str(), &json))
       {
-        Serial.println("Added json");
+        Serial.println("Updated to firebase database");
       }
       else
       {
@@ -797,9 +817,52 @@ void seq11(void)
     break;
   }
 }
+void seq12(void)
+{
+  switch (seq[12])
+  {
 
+  case 0:
+    if (timer_status(T12) == TIMOUT)
+    {
+      set_timer(T12, 1000);
+      total_working_minute = count_working_minute();
+      unsigned int cur_working_minute = count_cur_working_minute();
+      if (cur_working_minute == 0)
+        getLocalTime(&timeinfo);
+
+      if (total_working_minute == 0)
+      {
+        Serial.println("ERROR: total working minute counted 0, check ur working_time");
+      }
+      else
+      {
+
+        uint16_t temp = (double)cur_working_minute / (double)total_working_minute * (double)plan;
+        // Serial.printf("temp: %d cur: %d total: %d plan: %d \n", temp, cur_working_minute, total_working_minute, plan);
+        if (temp != target)
+        {
+          target = temp;
+          seq[12] = 100;
+        }
+      }
+      // get time
+      // calc past minute / total minute * plan
+    }
+    break;
+  case 100:
+
+    EEPROM_write(EEP_TARGET, target);
+    slave_update(LCD_TARGET);
+    lcd_update(LCD_TARGET);
+    seq[12] = 0;
+
+    break;
+  default:
+    break;
+  }
+}
 //== Custom  Function ============================================================
-
 unsigned long get_epoch_time()
 {
   time_t now;
@@ -866,6 +929,57 @@ bool is_working()
     }
   }
   return false;
+}
+unsigned int count_cur_working_minute()
+{
+  int _min = timeinfo.tm_min;   // 0830-1300,1400-1530,1540-1800
+  int _hour = timeinfo.tm_hour; //
+  int _time = _hour * 60 + _min;
+
+  unsigned int cur_total_min = 0;
+  for (int i = 0; i < strlen(working_time); i += 10)
+  {
+    if (working_time[i] == 0 || working_time[i] == 255)
+      break;
+    int from_time = ((working_time[i] - '0') * 10 + (working_time[i + 1] - '0')) * 60 + (working_time[i + 2] - '0') * 10 + (working_time[i + 3] - '0');
+    int to_time = ((working_time[i + 5] - '0') * 10 + (working_time[i + 6] - '0')) * 60 + (working_time[i + 7] - '0') * 10 + (working_time[i + 8] - '0');
+    // Serial.printf("from_time: %d to_time: %d", from_time, to_time);
+    if (_time <= from_time)
+      break;
+    else if (_time <= to_time)
+    {
+      cur_total_min += (_time - from_time);
+      break;
+    }
+    else
+    {
+      cur_total_min += (to_time - from_time);
+    }
+  }
+
+  if (ot)
+  {
+    for (int i = 0; i < strlen(ot_time); i += 10) // 1200-1230
+    {
+
+      if (ot_time[i] == 0 || ot_time[i] == 255)
+        return cur_total_min;
+      int from_time = ((ot_time[i] - '0') * 10 + (ot_time[i + 1] - '0')) * 60 + (ot_time[i + 2] - '0') * 10 + (ot_time[i + 3] - '0');
+      int to_time = ((ot_time[i + 5] - '0') * 10 + (ot_time[i + 6] - '0')) * 60 + (ot_time[i + 7] - '0') * 10 + (ot_time[i + 8] - '0');
+      if (_time <= from_time)
+        return cur_total_min;
+      else if (_time <= to_time)
+      {
+        cur_total_min += (_time - from_time);
+        return cur_total_min;
+      }
+      else
+      {
+        cur_total_min += (to_time - from_time);
+      }
+    }
+  }
+  return cur_total_min;
 }
 template <class T>
 int EEPROM_write(int ee, const T &value)
@@ -959,9 +1073,10 @@ void print_help()
   Serial.println(F("|                                    | DATA = ot, view state of ot                                                        |"));
   Serial.println(F("|@write DATA x                       | Overwrite DATA with x                                                              |"));
   Serial.println(F("|                                    | DATA = id, change id to x (0-255)                                                  |"));
+  Serial.println(F("|                                    | DATA = timer, change timer to x (0-9999)                                                             |"));
   Serial.println(F("|                                    | DATA = plan, change plan to x (0-9999)                                             |"));
   Serial.println(F("|                                    | DATA = actual, change actual to x (0-9999)                                         |"));
-  Serial.println(F("|                                    | DATA = target, change target to x (0-9999)                                         |"));
+  // Serial.println(F("|                                    | DATA = target, change target to x (0-9999)                                         |"));
   Serial.println(F("|                                    | DATA = working_time, change working time to x (e.g. 0830-1300,1400-1530,1540-1800) |"));
   Serial.println(F("|                                    | DATA = ot_time, change ot time to x (e.g. 1830-2030)                               |"));
   Serial.println(F("|                                    | DATA = ot, change the state of ot to x (0/1)                                       |"));
@@ -1199,6 +1314,8 @@ byte rx_command(char rx[])
       if (toUInt(command[2]) == -1)
         return COM_RX_NG;
       _u_integer = toUInt(command[2]);
+      if (_u_integer > 255)
+        return COM_RX_NG;
       device_id = _u_integer;
       EEPROM_write(EEP_DEVICE_ID, _u_integer);
       Serial.print("Writen DEVICE ID: ");
@@ -1211,6 +1328,8 @@ byte rx_command(char rx[])
       if (toUInt(command[2]) == -1)
         return COM_RX_NG;
       _u_integer = toUInt(command[2]);
+      if (_u_integer > 9999)
+        return COM_RX_NG;
       EEPROM_write(EEP_PLAN, _u_integer);
       Serial.print("Writen PLAN: ");
       Serial.println(_u_integer);
@@ -1225,6 +1344,8 @@ byte rx_command(char rx[])
       if (toUInt(command[2]) == -1)
         return COM_RX_NG;
       _u_integer = toUInt(command[2]);
+      if (_u_integer > 9999)
+        return COM_RX_NG;
       EEPROM_write(EEP_TIMER, _u_integer);
       timer_set = _u_integer;
       timer_reset();
@@ -1233,28 +1354,33 @@ byte rx_command(char rx[])
       Serial.println(_u_integer);
       return COM_RX_OK;
     }
-    else if (isEqual(command[1], "target"))
-    {
-      if (toUInt(command[2]) == -1)
-        return COM_RX_NG;
-      _u_integer = toUInt(command[2]);
-      EEPROM_write(EEP_TARGET, _u_integer);
-      Serial.print("Writen TARGET: ");
-      Serial.println(_u_integer);
-      target = _u_integer;
-      lcd_update(LCD_TARGET);
-      slave_update(LCD_TARGET);
-      return COM_RX_OK;
-    }
+    // else if (isEqual(command[1], "target"))
+    // {
+    //     if (toUInt(command[2]) == -1)
+    //         return COM_RX_NG;
+    //     _u_integer = toUInt(command[2]);
+    //     if (_u_integer > 9999)
+    //         return COM_RX_NG;
+    //     EEPROM_write(EEP_TARGET, _u_integer);
+    //     Serial.print("Writen TARGET: ");
+    //     Serial.println(_u_integer);
+    //     target = _u_integer;
+    //     lcd_update(LCD_TARGET);
+    //     slave_update(LCD_TARGET);
+    //     return COM_RX_OK;
+    // }
     else if (isEqual(command[1], "actual"))
     {
       if (toUInt(command[2]) == -1)
         return COM_RX_NG;
       _u_integer = toUInt(command[2]);
+      if (_u_integer > 9999)
+        return COM_RX_NG;
       EEPROM_write(EEP_ACTUAL_COUNTER, _u_integer);
       Serial.print("Writen ACTUAL_COUNTER: ");
       Serial.println(_u_integer);
       actual_counter = _u_integer;
+      timer_reset();
       lcd_update(LCD_ACTUAL);
       slave_update(LCD_ACTUAL);
       return COM_RX_OK;
@@ -1460,7 +1586,7 @@ void update_data(String _key, String _value)
   }
   else if (_key == "enable_ot")
   {
-    bool val = _value.toInt();
+    bool val = _value == String("true");
     if (val != ot)
     {
       ot = val;
@@ -1540,9 +1666,20 @@ void update_data(String _key, String _value)
     EEPROM_write(EEP_OT_TIME, ot_time);
     seq[6] = 0; // update target delay
   }
+  else if (_key == "forceupdate")
+  {
+
+    bool val = _value == String("true");
+
+    if (val != force_update)
+    {
+
+      force_update = val;
+    }
+  }
   else
   {
-    Serial.printf("Key:%s no found", _key);
+    PRINTF("Key: %s no found\n", _key);
   }
 }
 
@@ -1551,10 +1688,10 @@ void streamCallback(FirebaseStream data)
 
   // Print out all information
 
-  Serial.println("Stream Data...");
-  Serial.println(data.streamPath());
-  Serial.println(data.dataPath());
-  Serial.println(data.dataType());
+  PRINTLN("Stream Data...");
+  PRINTLN(data.streamPath());
+  PRINTLN(data.dataPath());
+  PRINTLN(data.dataType());
 
   if (data.dataTypeEnum() == fb_esp_rtdb_data_type_json)
   {
@@ -1686,9 +1823,7 @@ void init_io(void)
   pinMode(MUTE_SW_pin, INPUT_PULLUP);
   pinMode(BUZZER_pin, OUTPUT);
   digitalWrite(BUZZER_pin, LOW);
-  pinMode(BARCODE_SW_pin, INPUT);
 }
-
 void scan_i2c()
 {
   byte error, address;
