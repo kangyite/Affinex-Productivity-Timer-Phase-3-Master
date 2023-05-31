@@ -9,9 +9,9 @@
 #include <Firebase_ESP_Client.h>
 #include "addons/TokenHelper.h"
 #include "addons/RTDBHelper.h"
-#include <SoftwareSerial.h>
+#include <HardwareSerial.h>
 
-#define DEBUG
+// #define DEBUG
 #ifdef DEBUG
 #define PRINT(x) Serial.print(x)
 #define PRINTLN(x) Serial.println(x)
@@ -33,10 +33,10 @@ at24c256 eeprom(0x50);
 #define R_LED_pin 13
 #define BUZZER_pin 19
 #define MUTE_SW_pin 18
-#define BARCODE_RX_pin 15
+#define BARCODE_RX_pin 5
 //==Wifi===================================
 const char wifi_info[][2][30] = {
-    {"Papaya", "steam123"},
+    {"Papaya_6", "steam123"},
     {"AFX_6", "8edef@16206"}
     // {"IP9tcN32kd", "H$u3e*X3-uByaL=BTXw_r45t&"}
 };
@@ -136,8 +136,9 @@ int seq[MAX_SEQ_NUM];
 #define EEP_TARGET 0x06         //-0x07
 #define EEP_OT 0x08
 #define EEP_DEVICE_ID 0x09
-#define EEP_WORKING_TIME 0x20 //-0x84
-#define EEP_OT_TIME 0x90      //-0xF4
+#define EEP_BARCODE_COUNT 0x10 //-0x13
+#define EEP_WORKING_TIME 0x20  //-0x84
+#define EEP_OT_TIME 0x90       //-0xF4
 
 #define HOLD_TIME 3000
 
@@ -187,9 +188,13 @@ FirebaseJson json;
 bool force_update = false;
 
 //===Software Serial for barcode====================================
-#define MYPORT_TX 25
-#define MYPORT_RX 15
-EspSoftwareSerial::UART myPort;
+
+#define MYPORT_RX BARCODE_RX_pin
+HardwareSerial myPort(1);
+
+char barcodeBuf[20];
+int barcodeIdx = 0;
+uint32_t barcodeCount = 0;
 
 //===================FUNCTIONS DECLARATION=================================
 void init_io();
@@ -315,6 +320,8 @@ void setup()
   slave_update(LCD_PLAN);
   slave_update(LCD_ACTUAL);
 
+  EEPROM_read(EEP_BARCODE_COUNT, barcodeCount);
+
   xTaskCreatePinnedToCore(
       Task0code, /* Function to implement the task */
       "Task0",   /* Name of the task */
@@ -336,15 +343,7 @@ void setup()
   }
   timer_reset();
 
-  myPort.begin(115200, SWSERIAL_8N1, MYPORT_RX, MYPORT_TX, false);
-  if (!myPort)
-  { // If the object did not initialize, then its configuration is invalid
-    Serial.println("Invalid EspSoftwareSerial pin configuration, check config");
-    while (1)
-    { // Don't continue with invalid configuration
-      delay(1000);
-    }
-  }
+  myPort.begin(115200, SERIAL_8N1, 5);
 }
 
 void Task0code(void *parameter)
@@ -703,14 +702,80 @@ void seq6()
   switch (seq[6])
   {
   case 0:
-    while (myPort.available())
+    if (myPort.available())
     {
-      char c = myPort.read();
-      if (c == '@')
+      barcodeBuf[barcodeIdx] = (char)myPort.read();
+      PRINTF("c: %d\n", barcodeBuf[barcodeIdx]);
+      if (barcodeIdx >= 20)
+      {
+        seq[6] = 100;
+      }
+      else
+      {
+        seq[6] = 10;
+      }
+    }
+    break;
+  case 10:
+    if (barcodeBuf[barcodeIdx] == '\n')
+    {
+      PRINTLN("HERE");
+      unsigned long num = 0;
+      bool flag = 1;
+      for (int i = 0; i < barcodeIdx; i++)
+      {
+        if (barcodeBuf[i] < '0' || barcodeBuf[i] > '9')
+        { // not valid
+          PRINTLN("not valid");
+          seq[6] = 100;
+          flag = 0;
+          break;
+        }
+      }
+      if (flag == 0)
+        break;
+      barcodeBuf[barcodeIdx] = '\0';
+      for (int i = 0; i < 5; i++)
+      {
+        PRINTF("%d: %d\n", i, barcodeBuf[i]);
+      }
+      long tempCount = atol(barcodeBuf);
+      PRINTF("tempC: %u\n", tempCount);
+      if (tempCount == barcodeCount + 1)
       {
         seq[2] = 200;
       }
+      else if (tempCount > barcodeCount + 1)
+      {
+        actual_counter += tempCount - (barcodeCount + 1);
+        seq[2] = 200;
+      }
+      else
+      {
+        actual_counter += tempCount - 1;
+        seq[2] = 200;
+      }
+      barcodeCount = tempCount;
+      EEPROM_write(EEP_BARCODE_COUNT, barcodeCount);
+      seq[6] = 100;
     }
+    else if (barcodeBuf[barcodeIdx] > '9' || barcodeBuf[barcodeIdx] < '0')
+      seq[6] = 100;
+    else
+    {
+      barcodeIdx++;
+      seq[6] = 0;
+    }
+    break;
+
+  case 100:
+    PRINTLN("reseting barcode buffer");
+    barcodeIdx = 0;
+    while (myPort.available())
+      myPort.read();
+    seq[6] = 0;
+    break;
+  default:
     break;
   }
 }
@@ -1336,7 +1401,7 @@ byte rx_command(char rx[])
       plan = _u_integer;
       lcd_update(LCD_PLAN);
       slave_update(LCD_PLAN);
-      seq[6] = 0; // update target delay
+      seq[12] = 0; // update target delay
       return COM_RX_OK;
     }
     else if (isEqual(command[1], "timer"))
@@ -1400,7 +1465,7 @@ byte rx_command(char rx[])
         Serial.print("Writen WORKING_TIME: ");
         Serial.println(working_time);
         EEPROM_write(EEP_WORKING_TIME, working_time);
-        seq[6] = 0; // update target delay
+        seq[12] = 0; // update target delay
         return COM_RX_OK;
       }
       else
@@ -1423,7 +1488,7 @@ byte rx_command(char rx[])
         Serial.print("Writen OT_TIME: ");
         Serial.println(ot_time);
         EEPROM_write(EEP_OT_TIME, ot_time);
-        seq[6] = 0; // update target delay
+        seq[12] = 0; // update target delay
         return COM_RX_OK;
       }
     }
@@ -1434,7 +1499,7 @@ byte rx_command(char rx[])
       _u_integer = toUInt(command[2]);
       ot = _u_integer;
       EEPROM_write(EEP_OT, ot);
-      seq[6] = 0; // update target delay
+      seq[12] = 0; // update target delay
       Serial.print("Writen OT: ");
       Serial.println(ot);
       return COM_RX_OK;
@@ -1536,9 +1601,17 @@ void timer_reset()
 void lcd_update(byte lcd_data)
 {
   String str_out = "";
-
+  if (timer_count_down >= 10000 || timer_count_down < 0)
+    return;
+  if (plan >= 10000 || plan < 0)
+    return;
+  if (actual_counter >= 10000 || actual_counter < 0)
+    return;
+  if (target >= 10000 || target < 0)
+    return;
   if (lcd_data == LCD_TIME)
   {
+
     lcd.setCursor(14, 0);
     for (int _ = 0; _ < LCD_DATA_LEN - (int)(String(timer_count_down).length()); _++)
     {
@@ -1575,6 +1648,7 @@ void update_data(String _key, String _value)
 {
   if (_key == "actual")
   {
+    return;
     int val = _value.toInt();
     if (val != actual_counter)
     {
@@ -1591,11 +1665,12 @@ void update_data(String _key, String _value)
     {
       ot = val;
       EEPROM_write(EEP_OT, ot);
-      seq[6] = 0; // update target delay
+      seq[12] = 0; // update target delay
     }
   }
   else if (_key == "id")
   {
+    return;
     int val = _value.toInt();
     if (val != device_id)
     {
@@ -1612,7 +1687,7 @@ void update_data(String _key, String _value)
       EEPROM_write(EEP_PLAN, plan);
       lcd_update(LCD_PLAN);
       slave_update(LCD_PLAN);
-      seq[6] = 0; // update target del
+      seq[12] = 0; // update target del
     }
   }
   else if (_key == "timer_set")
@@ -1627,6 +1702,7 @@ void update_data(String _key, String _value)
   }
   else if (_key == "target")
   {
+    return;
     int val = _value.toInt();
     if (val != target)
     {
@@ -1634,7 +1710,7 @@ void update_data(String _key, String _value)
       EEPROM_write(EEP_TARGET, target);
       lcd_update(LCD_TARGET);
       slave_update(LCD_TARGET);
-      seq[6] = 0; // update target del
+      seq[12] = 0; // update target del
     }
   }
   else if (_key == "working_time")
@@ -1651,7 +1727,7 @@ void update_data(String _key, String _value)
       return;
     real_value.toCharArray(working_time, WORKING_TIME_LENGTH);
     EEPROM_write(EEP_WORKING_TIME, working_time);
-    seq[6] = 0; // update target delay
+    seq[12] = 0; // update target delay
   }
   else if (_key == "ot_time")
   {
@@ -1664,7 +1740,7 @@ void update_data(String _key, String _value)
       return;
     real_value.toCharArray(ot_time, WORKING_TIME_LENGTH);
     EEPROM_write(EEP_OT_TIME, ot_time);
-    seq[6] = 0; // update target delay
+    seq[12] = 0; // update target delay
   }
   else if (_key == "forceupdate")
   {
