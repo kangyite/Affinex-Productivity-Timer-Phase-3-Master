@@ -10,6 +10,7 @@
 #include "addons/TokenHelper.h"
 #include "addons/RTDBHelper.h"
 #include <HardwareSerial.h>
+// #include <WiFiClientSecure.h>
 
 // #define DEBUG
 #ifdef DEBUG
@@ -828,27 +829,29 @@ void seq11(void)
     break;
   case 100:
   {
-    String parent_path = "/devices/TIMER_" + String(device_id) + "/data_logger/" + get_date() + "/" + String(get_epoch_time());
-    json.clear();
-    json.set("/epoch_time", get_epoch_time());
-    json.set("/target", target);
-    json.set("/actual", actual_counter);
-    // Serial.println("Set json...\n");
-    if (Firebase.RTDB.updateNodeAsync(&fbdo, parent_path.c_str(), &json))
+    if (Firebase.ready())
     {
-      Serial.println("Updated to firebase data logger");
+      String parent_path = "/devices/TIMER_" + String(device_id) + "/data_logger/" + get_date() + "/" + String(get_epoch_time());
+      json.clear();
+      json.set("/epoch_time", get_epoch_time());
+      json.set("/target", target);
+      json.set("/actual", actual_counter);
+      // Serial.println("Set json...\n");
+      if (Firebase.RTDB.updateNodeAsync(&fbdo, parent_path.c_str(), &json))
+      {
+        Serial.println("Updated to firebase data logger");
+      }
+      else
+      {
+        Serial.println(fbdo.errorReason().c_str());
+      }
+      seq[11] = 200;
     }
-    else
-    {
-      Serial.println(fbdo.errorReason().c_str());
-    }
-    seq[11] = 200;
-
     break;
   }
   case 200:
   {
-    if (timer_status(T11) == TIMOUT)
+    if (timer_status(T11) == TIMOUT && Firebase.ready())
     {
       // FirebaseJson updateData;
       json.clear();
