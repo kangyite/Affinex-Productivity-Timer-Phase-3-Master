@@ -70,7 +70,7 @@ char tx0[MAX_RX_BUFFER];
 //=== Serial COM 2 ================================================
 #define RXD2 16
 #define TXD2 17
-bool read_all_serial = false;
+bool read_all_serial = true;
 //=== Commands ====================================================
 #define CMD_BUF 50
 #define CMD_SIZE 4
@@ -922,6 +922,7 @@ void seq12(void)
 
     EEPROM_write(EEP_TARGET, target);
     slave_update(LCD_TARGET);
+    slave_update(LCD_ACTUAL);
     lcd_update(LCD_TARGET);
     seq[12] = 0;
 
@@ -1236,7 +1237,11 @@ void slave_update(byte data)
   }
   else if (data == LCD_ACTUAL)
   {
-    out_str = "@text 2 [ACT :" + four_digit(actual_counter) + "]";
+    char sign;
+    if(actual_counter == target) sign = '=';
+    else if(actual_counter>target) sign = '+';
+    else sign = '-';
+    out_str = "@text 2 [ACT" + String(sign) + ":" + four_digit(actual_counter) + "]";
   }
   else
     return;
@@ -1518,6 +1523,13 @@ byte rx_command(char rx[])
       Serial2.print(' ');
     }
     Serial2.print('\r');
+    rx_status = COM_RX_OK;
+  }
+
+  else if(isEqual(command[0], "@getslave")){
+    slave_update(LCD_TARGET);
+    slave_update(LCD_PLAN);
+    slave_update(LCD_ACTUAL);
     rx_status = COM_RX_OK;
   }
   return rx_status;
