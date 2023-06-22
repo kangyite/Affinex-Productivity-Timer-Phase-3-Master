@@ -794,7 +794,7 @@ void seq7()
       if (timer_status(T07) == TIMOUT)
       {
         set_timer(T07, timer_set*1000);
-        if(target<plan) {
+        if(target<plan && is_working()) {
           target++;
           EEPROM_write(EEP_TARGET, target);
           slave_update(LCD_TARGET);
