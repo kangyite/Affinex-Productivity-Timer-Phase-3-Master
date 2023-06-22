@@ -140,6 +140,7 @@ int seq[MAX_SEQ_NUM];
 #define EEP_BARCODE_COUNT 0x10 //-0x13
 #define EEP_WORKING_TIME 0x20  //-0x84
 #define EEP_OT_TIME 0x90       //-0xF4
+bool eeprom_error = 0;
 
 #define HOLD_TIME 3000
 
@@ -209,7 +210,7 @@ void seq3();
 void seq4();
 void seq5();
 void seq6();
-void seq12();
+void seq7();
 void seq10();
 void seq11();
 template <class T>
@@ -390,7 +391,6 @@ void Task0code(void *parameter)
   {
     seq10();
     seq11();
-    seq12();
   }
 }
 
@@ -409,7 +409,8 @@ void loop()
   seq3(); // LCD
   seq4(); // LEDs
   seq5(); // Buzzer
-  seq6();
+  seq6(); // Barcode
+  seq7(); // Target
 }
 
 void seq0(void)
@@ -781,9 +782,35 @@ void seq6()
   }
 }
 
-void seq10(void)
+void seq7()
 {
   switch (seq[7])
+  {
+    case 0:
+      set_timer(T07, timer_set*1000);
+      seq[7] = 100;
+      break;
+    case 100:
+      if (timer_status(T07) == TIMOUT)
+      {
+        set_timer(T07, timer_set*1000);
+        if(target<plan) {
+          target++;
+          EEPROM_write(EEP_TARGET, target);
+          slave_update(LCD_TARGET);
+          lcd_update(LCD_TARGET);
+        }
+      }
+      seq[7] = 100;
+      break;
+    default:
+      break;
+  }
+}
+
+void seq10(void)
+{
+  switch (seq[10])
   {
   case 0:
     if (timer_status(T10) == TIMOUT)
@@ -794,7 +821,7 @@ void seq10(void)
         wifiMulti.run();
       }
     }
-    seq[7] = 0;
+    seq[10] = 0;
     break;
   case 10:
     break;
@@ -885,52 +912,7 @@ void seq11(void)
     break;
   }
 }
-void seq12(void)
-{
-  switch (seq[12])
-  {
 
-  case 0:
-    if (timer_status(T12) == TIMOUT)
-    {
-      set_timer(T12, 1000);
-      total_working_minute = count_working_minute();
-      unsigned int cur_working_minute = count_cur_working_minute();
-      if (cur_working_minute == 0)
-        getLocalTime(&timeinfo);
-
-      if (total_working_minute == 0)
-      {
-        Serial.println("ERROR: total working minute counted 0, check ur working_time");
-      }
-      else
-      {
-
-        uint16_t temp = (double)cur_working_minute / (double)total_working_minute * (double)plan;
-        // Serial.printf("temp: %d cur: %d total: %d plan: %d \n", temp, cur_working_minute, total_working_minute, plan);
-        if (temp != target)
-        {
-          target = temp;
-          seq[12] = 100;
-        }
-      }
-      // get time
-      // calc past minute / total minute * plan
-    }
-    break;
-  case 100:
-
-    EEPROM_write(EEP_TARGET, target);
-    slave_update(LCD_TARGET);
-    slave_update(LCD_ACTUAL);
-    lcd_update(LCD_TARGET);
-    seq[12] = 0;
-
-    break;
-  default:
-    break;
-  }
-}
 //== Custom  Function ============================================================
 unsigned long get_epoch_time()
 {
@@ -1054,7 +1036,9 @@ template <class T>
 int EEPROM_write(int ee, const T &value)
 {
   T reads;
-  EEPROM_read(ee, reads);
+  if(EEPROM_read(ee, reads) == -1){
+    return -1;
+  }
   if (value == reads)
     return -1;
 
@@ -1071,6 +1055,11 @@ int EEPROM_write(int ee, const T &value)
 template <class T>
 int EEPROM_read(int ee, T &value)
 {
+  if(eeprom.read(ee) == -1) {
+    Serial.println("EEPROM ERROR");
+    eeprom_error = 1;
+    return -1;
+  }
   byte *p = (byte *)(void *)&value;
   int i;
   for (i = 0; i < sizeof(value); i++)
@@ -1409,7 +1398,6 @@ byte rx_command(char rx[])
       plan = _u_integer;
       lcd_update(LCD_PLAN);
       slave_update(LCD_PLAN);
-      seq[12] = 0; // update target delay
       return COM_RX_OK;
     }
     else if (isEqual(command[1], "timer"))
@@ -1421,6 +1409,7 @@ byte rx_command(char rx[])
         return COM_RX_NG;
       EEPROM_write(EEP_TIMER, _u_integer);
       timer_set = _u_integer;
+      seq[7] = 0; // update target delay
       timer_reset();
 
       Serial.print("Writen TIMER: ");
@@ -1473,7 +1462,6 @@ byte rx_command(char rx[])
         Serial.print("Writen WORKING_TIME: ");
         Serial.println(working_time);
         EEPROM_write(EEP_WORKING_TIME, working_time);
-        seq[12] = 0; // update target delay
         return COM_RX_OK;
       }
       else
@@ -1496,7 +1484,6 @@ byte rx_command(char rx[])
         Serial.print("Writen OT_TIME: ");
         Serial.println(ot_time);
         EEPROM_write(EEP_OT_TIME, ot_time);
-        seq[12] = 0; // update target delay
         return COM_RX_OK;
       }
     }
@@ -1507,7 +1494,6 @@ byte rx_command(char rx[])
       _u_integer = toUInt(command[2]);
       ot = _u_integer;
       EEPROM_write(EEP_OT, ot);
-      seq[12] = 0; // update target delay
       Serial.print("Writen OT: ");
       Serial.println(ot);
       return COM_RX_OK;
@@ -1542,6 +1528,7 @@ void serialEvent2()
   while (Serial2.available())
   {
     _inChar = (char)Serial2.read();
+    // Serial.print(_inChar);
     rx[rx_index] = _inChar;
     if (rx_index <= MAX_RX_BUFFER)
       rx_index++;
@@ -1560,7 +1547,7 @@ void serialEvent2()
       {
       }
       else
-        Serial.println("*CMD_ERROR");
+        Serial.println("*CMD_ERROR2");
       rx_index = 0;
       rx_clear();
     }
@@ -1680,7 +1667,6 @@ void update_data(String _key, String _value)
     {
       ot = val;
       EEPROM_write(EEP_OT, ot);
-      seq[12] = 0; // update target delay
     }
   }
   else if (_key == "id")
@@ -1702,7 +1688,6 @@ void update_data(String _key, String _value)
       EEPROM_write(EEP_PLAN, plan);
       lcd_update(LCD_PLAN);
       slave_update(LCD_PLAN);
-      seq[12] = 0; // update target del
     }
   }
   else if (_key == "timer_set")
@@ -1712,12 +1697,13 @@ void update_data(String _key, String _value)
     {
       timer_set = val;
       EEPROM_write(EEP_TIMER, val);
+      seq[7] = 0; // update target delay
       timer_reset();
     }
   }
   else if (_key == "target")
   {
-    return;
+    return; //illegal to change target
     int val = _value.toInt();
     if (val != target)
     {
@@ -1725,7 +1711,7 @@ void update_data(String _key, String _value)
       EEPROM_write(EEP_TARGET, target);
       lcd_update(LCD_TARGET);
       slave_update(LCD_TARGET);
-      seq[12] = 0; // update target del
+      seq[7] = 0; // update target delay
     }
   }
   else if (_key == "working_time")
@@ -1742,7 +1728,6 @@ void update_data(String _key, String _value)
       return;
     real_value.toCharArray(working_time, WORKING_TIME_LENGTH);
     EEPROM_write(EEP_WORKING_TIME, working_time);
-    seq[12] = 0; // update target delay
   }
   else if (_key == "ot_time")
   {
@@ -1755,7 +1740,6 @@ void update_data(String _key, String _value)
       return;
     real_value.toCharArray(ot_time, WORKING_TIME_LENGTH);
     EEPROM_write(EEP_OT_TIME, ot_time);
-    seq[12] = 0; // update target delay
   }
   else if (_key == "forceupdate")
   {

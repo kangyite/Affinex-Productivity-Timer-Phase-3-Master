@@ -45,13 +45,14 @@ void at24c256::update(uint16_t m_addr, uint8_t m_data) {     // чете кле�
   }
 }
 //---------------------------------------------------------------------------------------------------------
-uint8_t at24c256::read(uint16_t m_addr) {                    // чете съдържанието на клетка с адрес m_addr
+int16_t at24c256::read(uint16_t m_addr) {                    // чете съдържанието на клетка с адрес m_addr
   uint8_t m_data = 0xFF;
 
   Wire.beginTransmission(m_chip_addr);
   Wire.write((uint8_t)(m_addr >> 8));
   Wire.write((uint8_t)m_addr);
-  Wire.endTransmission();
+  int error = Wire.endTransmission();
+  if(error != 0) return -1;
   Wire.requestFrom((uint8_t)m_chip_addr, (uint8_t)1);
   if (Wire.available())
     m_data = Wire.read();
