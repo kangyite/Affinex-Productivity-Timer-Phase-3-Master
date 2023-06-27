@@ -10,9 +10,12 @@
 #include "addons/TokenHelper.h"
 #include "addons/RTDBHelper.h"
 #include <HardwareSerial.h>
+#include <esp_task_wdt.h>
+#include <tdslite.h>
+#include <LinkedList.h>
 // #include <WiFiClientSecure.h>
 
-// #define DEBUG
+#define DEBUG
 #ifdef DEBUG
 #define PRINT(x) Serial.print(x)
 #define PRINTLN(x) Serial.println(x)
@@ -22,6 +25,12 @@
 #define PRINTLN(x)
 #define PRINTF(...)
 #endif
+#define SERIAL_PRINT_U16_AS_MB(U16SPAN)                                                            \
+    [](tdsl::u16char_view v) {                                                                     \
+        for (const auto ch : v) {                                                                  \
+            Serial.print(static_cast<char>(ch));                                                   \
+        }                                                                                          \
+    }(U16SPAN)
 
 WiFiMulti wifiMulti;
 hd44780_I2Cexp lcd;
@@ -37,9 +46,9 @@ at24c256 eeprom(0x50);
 #define BARCODE_RX_pin 5
 //==Wifi===================================
 const char wifi_info[][2][30] = {
-    {"Papaya_6", "steam123"},
-    {"AFX_6", "8edef@16206"}
-    // {"IP9tcN32kd", "H$u3e*X3-uByaL=BTXw_r45t&"}
+    // {"Papaya", "steam123"}
+    {"AFX_6", "8edef@16206"},
+    {"IP9tcN32kd", "H$u3e*X3-uByaL=BTXw_r45t&"}
 };
 const uint32_t connectTimeoutMs = 10000;
 
@@ -198,6 +207,31 @@ char barcodeBuf[20];
 int barcodeIdx = 0;
 uint32_t barcodeCount = 0;
 
+//===SQL============================================================
+#define SKETCH_TDSL_NETBUF_SIZE 4096
+#define SKETCH_TDSL_PACKET_SIZE 2048 // ~tcp segment size
+tdsl::uint8_t net_buf [SKETCH_TDSL_NETBUF_SIZE] = {};
+tdsl::arduino_driver<WiFiClient> driver{net_buf};
+char name[50] = "";
+char projectNum[50] = "";
+char batchNum[50] = "";
+char process[50] = "";
+char pcbModel[50] = "";
+char remark1[50] = "";
+char remark2[50] = "";
+char remark3[50] = "";
+char remark4[50] = "";
+tdsl::progmem_string_view query{TDSL_PMEMSTR("INSERT INTO [AFX_ERP].[dbo].[ESP32] Values(@p0,@p1,@p2,@p3,@p4,@p5,@p6,@p7,@p8,@p9,@p10,@p11,@p12)")};
+class sqlData
+{
+private:
+  /* data */
+public:
+  tdsl::sql_parameter_binding params[13];
+};
+LinkedList<sqlData> sqlQueue;
+
+
 //===================FUNCTIONS DECLARATION=================================
 void init_io();
 void print_the_date_and_file_of_sketch();
@@ -242,6 +276,8 @@ void update_data();
 void streamCallback(FirebaseStream data);
 void streamTimeoutCallback(bool timeout);
 void scan_i2c();
+bool tdslite_setup();
+static void row_callback(void * u, const tdsl::tds_colmetadata_token & colmd, const tdsl::tdsl_row & row);
 
 //===================================================================
 void setup()
@@ -270,7 +306,6 @@ void setup()
   eeprom.init();
   lcd.begin(20, 4);
   lcd.setCursor(0, 0);
-  // 0123456789012345
   lcd.print("Productivity    ");
   lcd.setCursor(0, 1);
   lcd.print("Timer & Counter ");
@@ -336,6 +371,11 @@ void setup()
   if (device_id >= 255)
   {
     Serial.println("This Device haven't set its id, please set it by using @write id x");
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("ID MISSING");
+    
+    
   }
   else
   {
@@ -346,6 +386,7 @@ void setup()
   timer_reset();
 
   myPort.begin(115200, SERIAL_8N1, 5);
+  
 }
 
 void Task0code(void *parameter)
@@ -387,6 +428,8 @@ void Task0code(void *parameter)
     Serial.printf("stream begin error, %s\n\n", stream.errorReason().c_str());
   // Assign a calback function to run when it detects changes on the database
   Firebase.RTDB.setStreamCallback(&stream, streamCallback, streamTimeoutCallback);
+  if(tdslite_setup())PRINTLN("SQL SETUP Successfully");
+  else PRINTLN("SQL SETUP Failed");
   for (;;)
   {
     seq10();
@@ -495,6 +538,8 @@ void seq2(void)
     { // hold
       actual_counter = 0;
       EEPROM_write(EEP_ACTUAL_COUNTER, (uint16_t)0);
+      target = 0;
+      EEPROM_write(EEP_TARGET, (uint16_t)0);
       timer_reset();
       force_update = true;
       seq[3] = 20;
@@ -519,6 +564,7 @@ void seq2(void)
     timer_reset();
     lcd_update(LCD_ACTUAL);
     slave_update(LCD_ACTUAL);
+    seq[11] = 100;
     seq[2] = 120;
     break;
   case 300:
@@ -528,7 +574,7 @@ void seq2(void)
       {
         set_timer(T02, 30);
         mute_toggle = !mute_toggle;
-
+        PRINTLN(mute_toggle?"MUTED":"UNMUTED");
         seq[2] = 0;
       }
     }
@@ -843,7 +889,7 @@ void seq11(void)
       // printLocalTime();
       if (force_update)
       {
-        Serial.println("Forcing Update");
+        PRINTLN("Forcing Update");
         seq[11] = 100;
         force_update = false;
       }
@@ -856,24 +902,29 @@ void seq11(void)
     break;
   case 100:
   {
-    if (Firebase.ready())
-    {
-      String parent_path = "/devices/TIMER_" + String(device_id) + "/data_logger/" + get_date() + "/" + String(get_epoch_time());
-      json.clear();
-      json.set("/epoch_time", get_epoch_time());
-      json.set("/target", target);
-      json.set("/actual", actual_counter);
-      // Serial.println("Set json...\n");
-      if (Firebase.RTDB.updateNodeAsync(&fbdo, parent_path.c_str(), &json))
-      {
-        Serial.println("Updated to firebase data logger");
-      }
-      else
-      {
-        Serial.println(fbdo.errorReason().c_str());
-      }
-      seq[11] = 200;
-    }
+    unsigned long a = millis();
+    
+    tdsl::sql_parameter_smallint sql_timerId{device_id};
+    tdsl::sql_parameter_varchar sql_name{name};
+    tdsl::sql_parameter_bigint sql_Epoch{get_epoch_time()};
+    tdsl::sql_parameter_smallint sql_Quantity{(int16_t)actual_counter};
+    tdsl::sql_parameter_smallint sql_Target{(int16_t)target};
+    tdsl::sql_parameter_varchar sql_projectNum{projectNum};
+    tdsl::sql_parameter_varchar sql_batchNum{batchNum};
+    tdsl::sql_parameter_varchar sql_Process{process};
+    tdsl::sql_parameter_varchar sql_PCBModel{pcbModel};
+    tdsl::sql_parameter_varchar sql_remark1{remark1};
+    tdsl::sql_parameter_varchar sql_remark2{remark2};
+    tdsl::sql_parameter_varchar sql_remark3{remark3};
+    tdsl::sql_parameter_varchar sql_remark4{remark4};
+    tdsl::sql_parameter_binding params []{sql_timerId,sql_name,sql_Epoch,sql_Quantity,sql_Target,sql_projectNum,sql_batchNum,sql_Process,sql_PCBModel,sql_remark1,sql_remark2,sql_remark3,sql_remark4};
+    sqlData q;
+    memcpy(q.params,params,sizeof(params));
+
+    int result = driver.execute_rpc(query, q.params, tdsl::rpc_mode::executesql, row_callback);
+    unsigned long b = millis();
+    PRINTF("Time: %d with result: %d\n",b-a,result);
+    seq[11] = 200;
     break;
   }
   case 200:
@@ -1223,6 +1274,7 @@ void slave_update(byte data)
   else if (data == LCD_TARGET)
   {
     out_str = "@text 1 [TGT :" + four_digit(target) + "]";
+    slave_update(LCD_ACTUAL);
   }
   else if (data == LCD_ACTUAL)
   {
@@ -1743,14 +1795,65 @@ void update_data(String _key, String _value)
   }
   else if (_key == "forceupdate")
   {
-
     bool val = _value == String("true");
-
     if (val != force_update)
     {
-
       force_update = val;
     }
+  }
+  else if (_key == "projectNum")
+  {
+    String real_value = _value;
+    if (_value[0] == '"') real_value = _value.substring(1, _value.length() - 1);
+    real_value.toCharArray(projectNum, 50);
+  }
+  else if (_key == "batchNum")
+  {
+    String real_value = _value;
+    if (_value[0] == '"') real_value = _value.substring(1, _value.length() - 1);
+    real_value.toCharArray(batchNum, 50);
+  }
+  else if (_key == "remark1")
+  {
+    String real_value = _value;
+    if (_value[0] == '"') real_value = _value.substring(1, _value.length() - 1);
+    real_value.toCharArray(remark1, 50);
+  }
+  else if (_key == "remark2")
+  {
+    String real_value = _value;
+    if (_value[0] == '"') real_value = _value.substring(1, _value.length() - 1);
+    real_value.toCharArray(remark2, 50);
+  }
+  else if (_key == "remark3")
+  {
+    String real_value = _value;
+    if (_value[0] == '"') real_value = _value.substring(1, _value.length() - 1);
+    real_value.toCharArray(remark3, 50);
+  }
+  else if (_key == "remark4")
+  {
+    String real_value = _value;
+    if (_value[0] == '"') real_value = _value.substring(1, _value.length() - 1);
+    real_value.toCharArray(remark4, 50);
+  }
+  else if (_key == "name")
+  {
+    String real_value = _value;
+    if (_value[0] == '"') real_value = _value.substring(1, _value.length() - 1);
+    real_value.toCharArray(name, 50);
+  }
+  else if (_key == "process")
+  {
+    String real_value = _value;
+    if (_value[0] == '"') real_value = _value.substring(1, _value.length() - 1);
+    real_value.toCharArray(process, 50);
+  }
+  else if (_key == "pcbModel")
+  {
+    String real_value = _value;
+    if (_value[0] == '"') real_value = _value.substring(1, _value.length() - 1);
+    real_value.toCharArray(pcbModel, 50);
   }
   else
   {
@@ -1764,9 +1867,9 @@ void streamCallback(FirebaseStream data)
   // Print out all information
 
   PRINTLN("Stream Data...");
-  PRINTLN(data.streamPath());
-  PRINTLN(data.dataPath());
-  PRINTLN(data.dataType());
+  // PRINTLN(data.streamPath());
+  // PRINTLN(data.dataPath());
+  // PRINTLN(data.dataType());
 
   if (data.dataTypeEnum() == fb_esp_rtdb_data_type_json)
   {
@@ -1937,4 +2040,35 @@ void scan_i2c()
   {
     Serial.println("done\n");
   }
+}
+static void info_callback(void *, const tdsl::tds_info_token & token) noexcept {
+    PRINTF("%c: [%d/%d/%d@%d] --> ", (token.is_info() ? 'I' : 'E'), token.number,
+                  token.state, token.class_, token.line_number);
+    SERIAL_PRINT_U16_AS_MB(token.msgtext);
+    PRINTLN("");
+}
+static void row_callback(void * u, const tdsl::tds_colmetadata_token & colmd,
+                         const tdsl::tdsl_row & row)  {
+    PRINTF("row: %.4s %d", row [0].as<tdsl::char_view>().data(),  
+                    row [1].as<tdsl::int32_t>());
+}
+bool tdslite_setup() {
+    PRINTLN("... init tdslite ...");
+    decltype(driver)::connection_parameters params;
+
+    params.server_name = "192.168.0.99"; // WL
+    params.user_name   = "espuser";
+    params.password    = "admin@123";
+    params.client_name = "esp32";
+    params.packet_size = {SKETCH_TDSL_PACKET_SIZE};
+    driver.set_info_callback(&info_callback, nullptr);
+    PRINTLN("here");
+    auto cr = driver.connect(params);
+    if (not(decltype(driver)::e_driver_error_code::success == cr)) {
+        PRINTF("... tdslite init failed, connection failed %d ...",static_cast<tdsl::uint32_t>(cr));
+        return false;
+    }
+
+    PRINTLN("... init tdslite end...");
+    return true;
 }
