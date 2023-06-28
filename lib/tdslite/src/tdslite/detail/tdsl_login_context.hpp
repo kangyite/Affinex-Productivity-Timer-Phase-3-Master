@@ -207,7 +207,6 @@ namespace tdsl {
              */
             template <typename LoginParamsType>
             auto do_login(const LoginParamsType & params) noexcept -> e_login_status {
-                Serial.println(111);
                 // Put a placeholder for length.
                 auto len_ph = tds_ctx.put_placeholder(0_tdsu32);
                 tds_ctx.write_be(

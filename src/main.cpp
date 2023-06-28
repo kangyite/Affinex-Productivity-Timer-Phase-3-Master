@@ -11,8 +11,10 @@
 #include "addons/RTDBHelper.h"
 #include <HardwareSerial.h>
 #include <esp_task_wdt.h>
+// #define TDSL_DEBUG_PRINT_ENABLED 
 #include <tdslite.h>
 #include <LinkedList.h>
+
 // #include <WiFiClientSecure.h>
 
 #define DEBUG
@@ -227,7 +229,18 @@ class sqlData
 private:
   /* data */
 public:
-  tdsl::sql_parameter_binding params[13];
+  byte timer_id;
+  unsigned long epoch;
+  int16_t quantity, target;
+  char name[50] = "";
+  char projectNum[50] = "";
+  char batchNum[50] = "";
+  char process[50] = "";
+  char pcbModel[50] = "";
+  char remark1[50] = "";
+  char remark2[50] = "";
+  char remark3[50] = "";
+  char remark4[50] = "";
 };
 LinkedList<sqlData> sqlQueue;
 
@@ -247,6 +260,7 @@ void seq6();
 void seq7();
 void seq10();
 void seq11();
+void seq12();
 template <class T>
 int EEPROM_read(int ee, T &value);
 template <class T>
@@ -270,7 +284,7 @@ void rx_clear(void);
 void timer_reset();
 void lcd_update(byte lcd_data);
 void Task0code(void *parameter);
-unsigned long get_epoch_time();
+unsigned long get_epoch_time(unsigned long timeout = 5000);
 String get_date();
 void update_data();
 void streamCallback(FirebaseStream data);
@@ -434,6 +448,7 @@ void Task0code(void *parameter)
   {
     seq10();
     seq11();
+    seq12();
   }
 }
 
@@ -557,16 +572,40 @@ void seq2(void)
       seq[2] = 0;
     }
     break;
-  case 200:
+  case 200:{
     actual_counter++;
     mute_toggle = false;
     EEPROM_write(EEP_ACTUAL_COUNTER, actual_counter);
     timer_reset();
     lcd_update(LCD_ACTUAL);
     slave_update(LCD_ACTUAL);
-    seq[11] = 100;
+    unsigned long a = millis();
+      
+    sqlData q;
+    q.timer_id = device_id;
+    q.quantity = actual_counter;
+    q.epoch = get_epoch_time(500);
+    q.target = target;
+    strcpy(q.name,name);
+    strcpy(q.projectNum,projectNum);
+    strcpy(q.batchNum,batchNum);
+    strcpy(q.process,process);
+    strcpy(q.pcbModel,pcbModel);
+    strcpy(q.remark1,remark1);
+    strcpy(q.remark2,remark2);
+    strcpy(q.remark3,remark3);
+    strcpy(q.remark4,remark4);
+    if(sqlQueue.size()>10){
+      sqlQueue.shift();
+      PRINTF("sqlQueue overload, size: %d\n",sqlQueue.size());
+    }
+    sqlQueue.add(q);
+    Serial.println(millis()-a);
+    seq[12] = 100;
     seq[2] = 120;
+  
     break;
+  }
   case 300:
     if (timer_status(T02) == TIMOUT)
     {
@@ -902,33 +941,29 @@ void seq11(void)
       }
       if (timeinfo.tm_sec == 0)
         seq[11] = 200;
-      // if (timeinfo.tm_min % 5 == 0 && timeinfo.tm_sec == 0)
-      //   seq[11] = 100;
+      if (sqlQueue.size()) seq[11] = 100;
     }
 
     break;
   case 100:
   {
     unsigned long a = millis();
-    
-    tdsl::sql_parameter_smallint sql_timerId{device_id};
-    tdsl::sql_parameter_varchar sql_name{name};
-    tdsl::sql_parameter_bigint sql_Epoch{get_epoch_time()};
-    tdsl::sql_parameter_smallint sql_Quantity{(int16_t)actual_counter};
-    tdsl::sql_parameter_smallint sql_Target{(int16_t)target};
-    tdsl::sql_parameter_varchar sql_projectNum{projectNum};
-    tdsl::sql_parameter_varchar sql_batchNum{batchNum};
-    tdsl::sql_parameter_varchar sql_Process{process};
-    tdsl::sql_parameter_varchar sql_PCBModel{pcbModel};
-    tdsl::sql_parameter_varchar sql_remark1{remark1};
-    tdsl::sql_parameter_varchar sql_remark2{remark2};
-    tdsl::sql_parameter_varchar sql_remark3{remark3};
-    tdsl::sql_parameter_varchar sql_remark4{remark4};
+    sqlData q = sqlQueue.shift();
+    tdsl::sql_parameter_smallint sql_timerId{q.timer_id};
+    tdsl::sql_parameter_varchar sql_name{q.name};
+    tdsl::sql_parameter_bigint sql_Epoch{q.epoch};
+    tdsl::sql_parameter_smallint sql_Quantity{q.quantity};
+    tdsl::sql_parameter_smallint sql_Target{q.target};
+    tdsl::sql_parameter_varchar sql_projectNum{q.projectNum};
+    tdsl::sql_parameter_varchar sql_batchNum{q.batchNum};
+    tdsl::sql_parameter_varchar sql_Process{q.process};
+    tdsl::sql_parameter_varchar sql_PCBModel{q.pcbModel};
+    tdsl::sql_parameter_varchar sql_remark1{q.remark1};
+    tdsl::sql_parameter_varchar sql_remark2{q.remark2};
+    tdsl::sql_parameter_varchar sql_remark3{q.remark3};
+    tdsl::sql_parameter_varchar sql_remark4{q.remark4};
     tdsl::sql_parameter_binding params []{sql_timerId,sql_name,sql_Epoch,sql_Quantity,sql_Target,sql_projectNum,sql_batchNum,sql_Process,sql_PCBModel,sql_remark1,sql_remark2,sql_remark3,sql_remark4};
-    sqlData q;
-    memcpy(q.params,params,sizeof(params));
-
-    int result = driver.execute_rpc(query, q.params, tdsl::rpc_mode::executesql, row_callback);
+    int result = driver.execute_rpc(query, params, tdsl::rpc_mode::executesql, row_callback);
     unsigned long b = millis();
     PRINTF("Time: %d with result: %d\n",b-a,result);
     seq[11] = 200;
@@ -967,16 +1002,36 @@ void seq11(void)
     break;
   }
   default:
-    break;
+  break;
   }
 }
+  void seq12(){
+    switch (seq[12])
+    {
+    case 0:
+      seq[12]=0;
+      break;
+    case 100:{
+      
+      seq[12] = 0;
+      break;
+
+    }
+
+    default:
+      break;
+    }
+  }
+  
+
+
 
 //== Custom  Function ============================================================
-unsigned long get_epoch_time()
+unsigned long get_epoch_time(unsigned long timeout)
 {
   time_t now;
   struct tm _timeinfo;
-  if (!getLocalTime(&_timeinfo))
+  if (!getLocalTime(&_timeinfo,timeout))
   {
     return (0);
   }

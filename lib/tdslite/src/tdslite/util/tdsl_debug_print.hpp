@@ -13,7 +13,7 @@
 #ifndef TDSL_UTIL_DEBUG_PRINT_HPP
 #define TDSL_UTIL_DEBUG_PRINT_HPP
 
-#define TDSL_DEBUG_PRINT_ENABLED
+
 #ifdef TDSL_DEBUG_PRINT_ENABLED
 #include <cstdio>
 #include <cwchar>
