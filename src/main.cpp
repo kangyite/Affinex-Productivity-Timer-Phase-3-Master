@@ -381,13 +381,14 @@ void setup()
       0,         /* Priority of the task */
       &Task0,    /* Task handle. */
       0);
-
+  timer_reset();
   if (device_id >= 255)
   {
-    Serial.println("This Device haven't set its id, please set it by using @write id x");
+    Serial.println("id missing");
+    
     lcd.clear();
     lcd.setCursor(0, 0);
-    lcd.print("ID MISSING");
+    lcd.print("     ID MISSING     ");
     
     
   }
@@ -397,7 +398,7 @@ void setup()
     Serial.print("Device ID: ");
     Serial.println(device_id);
   }
-  timer_reset();
+  
 
   myPort.begin(115200, SERIAL_8N1, 5);
   
@@ -536,7 +537,7 @@ void seq2(void)
       }
       else if (digitalRead(MUTE_SW_pin) == LOW)
       {
-        set_timer(T02, 30);
+        set_timer(T02, 40);
         seq[2] = 300;
       }
     }
@@ -584,7 +585,7 @@ void seq2(void)
     sqlData q;
     q.timer_id = device_id;
     q.quantity = actual_counter;
-    q.epoch = get_epoch_time(500);
+    q.epoch = get_epoch_time(300);
     q.target = target;
     strcpy(q.name,name);
     strcpy(q.projectNum,projectNum);
@@ -611,7 +612,7 @@ void seq2(void)
     {
       if (digitalRead(MUTE_SW_pin) == HIGH)
       {
-        set_timer(T02, 30);
+        set_timer(T02, 50);
         mute_toggle = !mute_toggle;
         PRINTLN(mute_toggle?"MUTED":"UNMUTED");
         seq[2] = 0;
