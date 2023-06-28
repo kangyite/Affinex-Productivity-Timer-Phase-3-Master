@@ -12,5 +12,6 @@
         "functional": "cpp",
         "utility": "cpp",
         "type_traits": "cpp"
-    }
+    },
+    "cmake.sourceDirectory": "C:/Users/kangy/OneDrive/Documents/PlatformIO/Projects/Affinex Productivity Timer Phase 3 Master/.pio/libdeps/esp32dev/tdslite/examples/minimal-sql-shell"
 }

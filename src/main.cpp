@@ -46,7 +46,7 @@ at24c256 eeprom(0x50);
 #define BARCODE_RX_pin 5
 //==Wifi===================================
 const char wifi_info[][2][30] = {
-    // {"Papaya", "steam123"}
+    {"Papaya", "steam123"},
     {"AFX_6", "8edef@16206"},
     {"IP9tcN32kd", "H$u3e*X3-uByaL=BTXw_r45t&"}
 };
@@ -864,7 +864,14 @@ void seq10(void)
       set_timer(T10, 20000);
       if (WiFi.status() != WL_CONNECTED)
       {
-        wifiMulti.run();
+        if (wifiMulti.run() == WL_CONNECTED)
+        {
+          Serial.println("");
+          Serial.print("WiFi connected to: ");
+          Serial.println(WiFi.SSID());
+          Serial.print("IP address: ");
+          Serial.println(WiFi.localIP());
+        }
       }
     }
     seq[10] = 0;
@@ -895,8 +902,8 @@ void seq11(void)
       }
       if (timeinfo.tm_sec == 0)
         seq[11] = 200;
-      if (timeinfo.tm_min % 5 == 0 && timeinfo.tm_sec == 0)
-        seq[11] = 100;
+      // if (timeinfo.tm_min % 5 == 0 && timeinfo.tm_sec == 0)
+      //   seq[11] = 100;
     }
 
     break;
